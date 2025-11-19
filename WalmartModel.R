@@ -1,5 +1,6 @@
 library(vroom)
 library(dplyr)
+library(tidymodels)
 
 #Load in data
 train_data <- vroom("data/train.csv")
@@ -55,19 +56,19 @@ weeks_until <- function(x, dates_by_year) {
 }
 
 # Build recipe (adjust outcome/predictor names as needed)
-rec <- recipe(weekly_sales ~ ., data = train) %>%
+my_recipe <- recipe(Weekly_Sales ~ ., data = joined_train_data) %>%
   step_mutate(
-    date = as.Date(Date),                 # ensure Date column is Date type
+    date = as.Date(Date),
     is_christmas    = date %in% christmas_dates,
     is_thanksgiving = date %in% thanksgiving_dates,
     is_labor_day    = date %in% labor_day_dates,
     is_super_bowl   = date %in% super_bowl_dates,
-    weeks_till_christmas    = weeks_until(date, christmas_dates),
-    weeks_till_thanksgiving = weeks_until(date, thanksgiving_dates),
-    weeks_till_labor_day    = weeks_until(date, labor_day_dates),
-    weeks_till_super_bowl   = weeks_until(date, super_bowl_dates)
+    #weeks_till_christmas    = weeks_until(date, christmas_dates),
+    #weeks_till_thanksgiving = weeks_until(date, thanksgiving_dates),
+    #weeks_till_labor_day    = weeks_until(date, labor_day_dates),
+    #weeks_till_super_bowl   = weeks_until(date, super_bowl_dates)
   ) %>%
-  step_rm(Date)  # optional: drop original date column if redundant
+  step_rm(Date)
 
 
 
@@ -75,7 +76,6 @@ rec <- recipe(weekly_sales ~ ., data = train) %>%
 # 1. Time & Calendar Features
 # 
 # (Weekly data depends heavily on seasonal timing)
-# 
 # Basic calendar:
 #   
 #   Year
@@ -86,90 +86,48 @@ rec <- recipe(weekly_sales ~ ., data = train) %>%
 # 
 # Quarter
 # 
-# DayOfYear or WeekOfYear
+# WeekOfYear
 # 
 # IsHoliday (from data)
-# 
 # IsHoliday_nextWeek
-# 
 # IsHoliday_prevWeek
-# 
 # Holiday proximity (very important):
 #   
 #   Weeks_to_Christmas
-# 
 # Weeks_to_Thanksgiving
-# 
 # Weeks_to_SuperBowl
-# 
 # Weeks_to_LaborDay
-# 
 # IsWeekBeforeHoliday
-# 
 # IsWeekAfterHoliday
-# 
 # IsTwoWeeksBeforeHoliday
-# 
 # Seasonality indicators:
 #   
 #   IsWinter
-# 
 # IsSpring
-# 
 # IsSummer
-# 
 # IsFall
 # 
 # Cyclical encodings (optional):
-#   
 #   sin_week = sin(2π × week/52)
 # 
 # cos_week = cos(2π × week/52)
-# 
 # (captures annual periodicity)
 # 
 # 2. Store-Level Features
-# 
-# (from stores.csv and engineered)
-# 
-# Provided fields:
-#   
-#   Store_Type (A/B/C/etc.)
-# 
-# Store_Size
-# 
 # Engineered:
 #   
 #   Store_Size_Bucket (Small, Medium, Large)
-# 
-# Type_is_A
-# 
-# Type_is_B, etc.
-# 
 # Store_Age (years since first appearance in dataset)
-# 
 # Store_Historical_AvgSales
-# 
 # Store_Historical_Trend (slope of sales over time)
-# 
 # Interaction terms:
-#   
-#   Dept × Store_Type
-# 
-# Dept × Store_Size
-# 
 # Store_Type × Month
-# 
 # Store_Type × Holiday
 # 
 # 3. Department-Level Features
-# 
 # (dept behavior is the single strongest predictor)
-# 
 # Department historical stats:
-#   
 #   Dept_Mean_Sales
-# 
 # Dept_Median_Sales
 # 
 # Dept_Trend_Linear (slope per dept)
@@ -303,7 +261,6 @@ rec <- recipe(weekly_sales ~ ., data = train) %>%
 # Raw fields:
 #   
 #   Temperature
-# 
 # Fuel_Price
 # 
 # CPI
@@ -459,3 +416,72 @@ rec <- recipe(weekly_sales ~ ., data = train) %>%
 #   Store_Size × Unemployment
 # 
 # Store_Type × CPI
+
+#Prep & Bake Recipe
+prep <- prep(my_recipe)
+
+###Model###
+knn_model <- nearest_neighbor(
+  mode = "regression",
+  neighbors = tune(),
+  weight_func = "rectangular",  # standard unweighted KNN
+  dist_power = 2
+) %>% set_engine("kknn")
+
+#Set Workflow
+wf <- workflow() %>%
+  add_recipe(my_recipe) %>%
+  add_model(knn_model)
+
+#set up grid of tuning values
+tuning_grid <- grid_regular(
+  neighbors(range = c(1L, 51L)),
+  levels = 5)
+
+folds <- vfold_cv(joined_train_data ,v = 3 ,repeats = 1)
+
+#CV
+CV_results <- wf %>%
+  tune_grid(resamples = folds
+            ,grid = tuning_grid
+            ,metrics = metric_set(roc_auc))
+
+bestTune <- CV_results %>%
+  select_best(metric = "roc_auc")
+
+#finalize and fit workflow
+final_wf <-
+  wf %>%
+  finalize_workflow(bestTune) %>%
+  fit(data = train_data)
+
+#Identify the best levels of penalty and mixture (highest mean)
+CV_results %>%
+  collect_metrics() %>%
+  arrange(desc(mean))
+
+#plot levels of penalty and mixture
+autoplot(CV_results)
+
+#Get Predictions
+predictions <-predict(final_wf,
+                      new_data = test_data
+                      ,type = "prob")
+
+#Remove p(0) column from df
+predictions <- predictions %>% 
+  select(-.pred_0) %>%
+  #rename .pred_1 as "action" for kaggle submission
+  rename (Action = .pred_1)
+
+
+# Combine with test_data ID
+kaggle_submission <- bind_cols(
+  test_data %>% select(id),
+  predictions
+)
+
+#write submission df to CSV for submission
+vroom_write(kaggle_submission, "KNNSubmission.csv" ,delim = ",")
+
+
