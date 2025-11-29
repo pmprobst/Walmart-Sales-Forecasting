@@ -209,7 +209,7 @@ fullTrain <- joined_train_data %>%
   add_calendar_features() %>%
   add_holiday_proximity() %>%
   add_markdown_features() %>%
-  add_holiday_sales_lookbacks() %>%
+  # add_holiday_sales_lookbacks() %>%
   add_store_dept_stats(train_joined = joined_train_data, df = .) %>%
   add_store_dept_history() %>%
   add_macro_features() %>%
@@ -225,7 +225,7 @@ fullTest <- joined_test_data %>%
   add_calendar_features() %>%
   add_holiday_proximity() %>%
   add_markdown_features() %>%
-  add_holiday_sales_lookbacks() %>%
+  # add_holiday_sales_lookbacks() %>%
   add_store_dept_stats(train_joined = joined_train_data, df = .) %>%
   add_store_dept_history() %>%
   add_macro_features() %>%
