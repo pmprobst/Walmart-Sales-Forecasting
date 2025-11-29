@@ -181,23 +181,6 @@ my_recipe <- recipe(Weekly_Sales ~ ., data = joined_train_data) %>%
 #   One-hot encode: Store_Type, Dept, Month
 # Label encoding (if using tree models): Dept, Store_Type
 # 
-# Interaction expansions:
-#   StoreType × Month
-# Dept × Month
-# StoreSize × Dept × Month (optional high-cardinality)
-# 
-# Frequency encodings:
-#   
-#   Dept_Frequency = count(dept occurrences)
-# 
-# Store_Frequency
-# 
-# Outlier indicators:
-#   
-#   Is_Sales_Spike = Weekly_Sales > 95th percentile
-# 
-# Is_Anomalous_Week = unusual spike/drop
-# 
 # 11. Extreme-Value / Market-Shift Features
 # 
 # Tracks long-term macro trends.
@@ -205,22 +188,6 @@ my_recipe <- recipe(Weekly_Sales ~ ., data = joined_train_data) %>%
 # Macro_Trend = rolling_mean(CPI – Unemployment)
 # Store_Macro_Interaction = Store_Size × CPI
 # Fuel_Price_Elasticity_Proxy = Fuel_Price / Fuel_Price_meanStore
-# 
-# 12. Cross-Feature Groups (high gain for models like CatBoost/LightGBM)
-# Dept + Season:
-#   Dept × Season
-# Dept × Quarter
-# 
-# StoreType + Holiday:
-#   StoreType × Thanksgiving
-# StoreType × Christmas
-# Dept + Markdowns:
-#   Dept × Total_MarkDown
-# Dept × Any_Promo
-# 
-# Store + Economic:
-#   Store_Size × Unemployment
-# Store_Type × CPI
 
 #Prep & Bake Recipe
 prep <- prep(my_recipe)
