@@ -1,6 +1,7 @@
 library(vroom)
 library(dplyr)
 library(tidymodels)
+library(lubridate)
 
 #Load in data
 train_data <- vroom("data/train.csv")
@@ -11,7 +12,7 @@ store_df <- vroom("data/stores.csv")
 ###DATA CLEANING###
 
 #clean up markdown folumns in features data
-clean_features_df <- features_df %>% 
+clean_features_df <- features_df %>%
   # Replace NA values in markdown columns with 0
   mutate(across(starts_with("MarkDown"), ~tidyr::replace_na(., 0))) %>%
   # Replace negative markdown values with 0
@@ -30,170 +31,203 @@ head(joined_train_data)
 
 ###FEATURE ENGINEERING###
 
-# Holiday date vectors keyed by year
-christmas_dates    <- as.Date(c("2010-12-31","2011-12-30","2012-12-28","2013-12-27")); names(christmas_dates)    <- 2010:2013
-thanksgiving_dates <- as.Date(c("2010-11-26","2011-11-25","2012-11-23","2013-11-29")); names(thanksgiving_dates) <- 2010:2013
-labor_day_dates    <- as.Date(c("2010-09-10","2011-09-09","2012-09-07","2013-09-06")); names(labor_day_dates)    <- 2010:2013
-super_bowl_dates   <- as.Date(c("2010-02-12","2011-02-11","2012-02-10","2013-02-08")); names(super_bowl_dates)   <- 2010:2013
+# ---------- Holiday date helpers (US) ----------
+first_weekday_on_or_after <- function(d, target_wday, week_start = 1) {
+  # target_wday: Monday=1 ... Sunday=7 (when week_start=1)
+  d + days((target_wday - wday(d, week_start = week_start) + 7) %% 7)
+}
+thanksgiving_date <- function(y) { # 4th Thursday in Nov
+  first_thu <- first_weekday_on_or_after(ymd(sprintf("%d-11-01", y)), target_wday = 4)
+  first_thu + weeks(3)
+}
+labor_day_date <- function(y) {     # 1st Monday in Sep
+  first_weekday_on_or_after(ymd(sprintf("%d-09-01", y)), target_wday = 1)
+}
+super_bowl_date <- function(y) {    # (approx) 1st Sunday in Feb
+  first_weekday_on_or_after(ymd(sprintf("%d-02-01", y)), target_wday = 7)
+}
+weeks_to <- function(date, holiday_date) as.numeric(difftime(holiday_date, date, units = "days")) / 7
 
-# Helpers: get next (or same-year) holiday date, then weeks until
-next_or_same <- function(x, dates_by_year) {
-  yr   <- year(x)
-  this <- dates_by_year[as.character(yr)]
-  next <- dates_by_year[as.character(yr + 1)]
-  ifelse(!is.na(this) & x <= this, this,
-         ifelse(!is.na(next), next, as.Date(NA)))
+# ---------- Feature builders ----------
+add_calendar_features <- function(df) {
+  df %>%
+    mutate(
+      Year      = year(Date),
+      Month     = month(Date),
+      Quarter   = quarter(Date),
+      WeekOfYear= isoweek(Date),
+      Week      = week(Date)
+    )
 }
 
-weeks_until <- function(x, dates_by_year) {
-  target <- next_or_same(x, dates_by_year)
-  ifelse(is.na(target), NA_real_,
-         ceiling(as.numeric(difftime(target, x, units = "days")) / 7))
+add_holiday_proximity <- function(df) {
+  df %>%
+    mutate(
+      Weeks_to_Christmas    = weeks_to(Date, ymd(sprintf("%d-12-25", Year))),
+      Weeks_to_Thanksgiving = weeks_to(Date, map_dbl(Year, ~ as.numeric(thanksgiving_date(.x)) ) |> as_date()),
+      Weeks_to_SuperBowl    = weeks_to(Date, map_dbl(Year, ~ as.numeric(super_bowl_date(.x)) ) |> as_date()),
+      Weeks_to_LaborDay     = weeks_to(Date, map_dbl(Year, ~ as.numeric(labor_day_date(.x)) ) |> as_date())
+    )
 }
 
-# Build recipe (adjust outcome/predictor names as needed)
-my_recipe <- recipe(Weekly_Sales ~ ., data = joined_train_data) %>%
-  step_mutate(DecDate = decimal_date(Date)) %>%
-  step_impute_bag(CPI, Unemployment,
-                  impute_with = imp_vars(DecDate, Store)) %>%
-  step_mutate(
-    date = as.Date(Date),
-    is_christmas    = date %in% christmas_dates,
-    is_thanksgiving = date %in% thanksgiving_dates,
-    is_labor_day    = date %in% labor_day_dates,
-    is_super_bowl   = date %in% super_bowl_dates,
-    #weeks_till_christmas    = weeks_until(date, christmas_dates),
-    #weeks_till_thanksgiving = weeks_until(date, thanksgiving_dates),
-    #weeks_till_labor_day    = weeks_until(date, labor_day_dates),
-    #weeks_till_super_bowl   = weeks_until(date, super_bowl_dates)
-  ) %>%
-  step_rm(Date)
+add_markdown_features <- function(df) {
+  md_cols <- paste0("MarkDown", 1:5)
+  df %>%
+    mutate(across(all_of(md_cols), ~ replace_na(.x, 0))) %>%
+    mutate(
+      Holiday_Markdown = IsHoliday & (MarkDown1 > 0 | MarkDown2 > 0 | MarkDown3 > 0 | MarkDown4 > 0 | MarkDown5 > 0)
+    )
+}
 
+add_store_dept_stats <- function(train_joined, df) {
+  # calendar fields needed for seasonality
+  tj <- add_calendar_features(train_joined)
+  
+  store_stats <- tj %>%
+    group_by(Store) %>%
+    summarise(
+      Store_Historical_AvgSales = mean(Weekly_Sales, na.rm = TRUE),
+      Store_First_Date = min(Date),
+      Store_Last_Date  = max(Date),
+      Store_Historical_Trend = coef(lm(Weekly_Sales ~ as.numeric(Date)))[2],
+      .groups = "drop"
+    ) %>%
+    mutate(Store_Age = as.numeric(difftime(Store_Last_Date, Store_First_Date, units = "days")) / 365.25) %>%
+    select(-Store_First_Date, -Store_Last_Date)
+  
+  dept_stats <- tj %>%
+    group_by(Dept) %>%
+    summarise(
+      Dept_Mean_Sales   = mean(Weekly_Sales, na.rm = TRUE),
+      Dept_Median_Sales = median(Weekly_Sales, na.rm = TRUE),
+      Dept_Trend_Linear = coef(lm(Weekly_Sales ~ as.numeric(Date)))[2],
+      .groups = "drop"
+    )
+  
+  dept_season <- tj %>%
+    group_by(Dept, WeekOfYear) %>%
+    summarise(Dept_Seasonality_Index = mean(Weekly_Sales, na.rm = TRUE), .groups = "drop")
+  
+  df %>%
+    left_join(store_stats, by = "Store") %>%
+    left_join(dept_stats,  by = "Dept") %>%
+    left_join(dept_season, by = c("Dept", "WeekOfYear"))
+}
 
+add_store_dept_history <- function(df) {
+  # prev/next holiday flags at Store timeline (same across depts)
+  hol_by_store <- df %>%
+    distinct(Store, Date, IsHoliday) %>%
+    arrange(Store, Date) %>%
+    group_by(Store) %>%
+    mutate(
+      IsHoliday_prevWeek = lag(IsHoliday, 1),
+      IsHoliday_nextWeek = lead(IsHoliday, 1)
+    ) %>%
+    ungroup()
+  
+  df %>%
+    left_join(hol_by_store, by = c("Store", "Date", "IsHoliday")) %>%
+    arrange(Store, Dept, Date) %>%
+    group_by(Store, Dept) %>%
+    mutate(
+      Lag_1_week_sales  = lag(Weekly_Sales, 1),
+      Lag_2_week_sales  = lag(Weekly_Sales, 2),
+      Lag_4_week_sales  = lag(Weekly_Sales, 4),
+      Lag_52_week_sales = lag(Weekly_Sales, 52),
+      
+      sales_lag1 = lag(Weekly_Sales, 1),
+      Rolling_4w_mean   = slide_dbl(sales_lag1, mean, .before = 3,  .complete = TRUE, na.rm = TRUE),
+      Rolling_8w_mean   = slide_dbl(sales_lag1, mean, .before = 7,  .complete = TRUE, na.rm = TRUE),
+      Rolling_13w_mean  = slide_dbl(sales_lag1, mean, .before = 12, .complete = TRUE, na.rm = TRUE),
+      Rolling_26w_mean  = slide_dbl(sales_lag1, mean, .before = 25, .complete = TRUE, na.rm = TRUE),
+      Rolling_52w_mean  = slide_dbl(sales_lag1, mean, .before = 51, .complete = TRUE, na.rm = TRUE),
+      
+      Dept_x_Holiday       = as.numeric(IsHoliday),
+      Dept_x_Temperature   = Temperature,
+      Dept_x_Fuel_Price    = Fuel_Price,
+      Dept_x_CPI           = CPI,
+      Dept_x_Unemployment  = Unemployment
+    ) %>%
+    ungroup() %>%
+    select(-sales_lag1)
+}
 
+add_macro_features <- function(df) {
+  df %>%
+    arrange(Store, Date) %>%
+    group_by(Store) %>%
+    mutate(
+      Macro_raw    = CPI - Unemployment,
+      Macro_Trend  = slide_dbl(lag(Macro_raw, 1), mean, .before = 12, .complete = FALSE, na.rm = TRUE),
+      Fuel_Price_meanStore = mean(Fuel_Price, na.rm = TRUE),
+      Fuel_Price_Elasticity_Proxy = Fuel_Price / Fuel_Price_meanStore
+    ) %>%
+    ungroup() %>%
+    select(-Macro_raw)
+}
 
-# 1. Time & Calendar Features
-# 
-# (Weekly data depends heavily on seasonal timing)
-# Basic calendar:
-# Month
-# Week
-# Quarter
-# WeekOfYear
-# 
-# IsHoliday (from data)
-# IsHoliday_nextWeek
-# IsHoliday_prevWeek
-# Holiday proximity (very important):
-# Weeks_to_Christmas
-# Weeks_to_Thanksgiving
-# Weeks_to_SuperBowl
-# Weeks_to_LaborDay
-# Seasonality indicators:
-# 
-# 2. Store-Level Features
-# Engineered:
-# Store_Size_Bucket (Small, Medium, Large)
-# Store_Age (years since first appearance in dataset)
-# Store_Historical_AvgSales
-# Store_Historical_Trend (slope of sales over time)
-# Interaction terms:
-# Store_Type × Month
-# Store_Type × Holiday
-# 
-# 3. Department-Level Features
-# (dept behavior is the single strongest predictor)
-# Department historical stats:
-# Dept_Mean_Sales
-# Dept_Median_Sales
-# Dept_Trend_Linear (slope per dept)
-# Dept_Seasonality_Index (avg sales by week)
-# Interaction terms:
-#   
-#   Dept × Holiday
-# 
-# Dept × Temperature
-# 
-# Dept × Fuel_Price
-# 
-# Dept × CPI
-# 
-# Dept × Unemployment
-# 
-# 4. Store–Dept History Features
-# 
-# These are extremely powerful.
-# 
-# Lags:
-#   
-#   Lag_1_week_sales
-# 
-# Lag_2_week_sales
-# 
-# Lag_4_week_sales
-# 
-# Lag_52_week_sales (captures annual patterns)
-# 
-# Rolling windows:
-#   
-#   Rolling_4w_mean
-# 
-# Rolling_8w_mean
-# 
-# Rolling_13w_mean
-# 
-# Rolling_26w_mean
-# 
-# Rolling_52w_mean
-# 
-# Lag_Christmas_Sales
-# 
-# Lag_Thanksgiving_Sales
-# 
-# 5. Price, Promotion, and Markdown Features
-# 
-# (MarkDown variables are sparse but extremely predictive)
-# Holiday_Markdown (markdown > 0 during holiday weeks)
-# 
-# Imputed values (if needed):
-#   
-#   Zero-filled imputation if outside promo window
-# 
-# Mean/median per store-month
-# 
-# Model-based imputation
-# 
-# Interactions:
-#   
-#   MarkDown × Dept
-# 
-# MarkDown × Store_Type
-# 
-# MarkDown × Holiday
-# 
-# MarkDown × Dept is one of the most powerful combinations.
-#
-# 6. Regional Economic Features
-# (from features.csv)
-# 
-# 10. Encoding & Miscellaneous Features
-# Categorical encoding:
-#   One-hot encode: Store_Type, Dept, Month
-# Label encoding (if using tree models): Dept, Store_Type
-# 
-# 11. Extreme-Value / Market-Shift Features
-# 
-# Tracks long-term macro trends.
-# 
-# Macro_Trend = rolling_mean(CPI – Unemployment)
-# Store_Macro_Interaction = Store_Size × CPI
-# Fuel_Price_Elasticity_Proxy = Fuel_Price / Fuel_Price_meanStore
+# Holiday-week sales (prev year) lookups
+add_holiday_sales_lookbacks <- function(df) {
+  df <- add_calendar_features(df)
+  
+  years <- sort(unique(df$Year))
+  xmas_week <- tibble(Year = years, XMasWeek = isoweek(ymd(sprintf("%d-12-25", years))))
+  thx_week  <- tibble(Year = years, ThxWeek  = isoweek(map(years, thanksgiving_date) |> as_date()))
+  
+  xmas_sales <- df %>%
+    left_join(xmas_week, by = "Year") %>%
+    filter(WeekOfYear == XMasWeek) %>%
+    group_by(Store, Dept, Year) %>%
+    summarise(Christmas_Sales = mean(Weekly_Sales, na.rm = TRUE), .groups = "drop") %>%
+    mutate(Year = Year + 1) %>%
+    rename(Lag_Christmas_Sales = Christmas_Sales)
+  
+  thx_sales <- df %>%
+    left_join(thx_week, by = "Year") %>%
+    filter(WeekOfYear == ThxWeek) %>%
+    group_by(Store, Dept, Year) %>%
+    summarise(Thanksgiving_Sales = mean(Weekly_Sales, na.rm = TRUE), .groups = "drop") %>%
+    mutate(Year = Year + 1) %>%
+    rename(Lag_Thanksgiving_Sales = Thanksgiving_Sales)
+  
+  df %>%
+    left_join(xmas_sales, by = c("Store", "Dept", "Year")) %>%
+    left_join(thx_sales,  by = c("Store", "Dept", "Year"))
+}
+
+# ---------- Build final modeling frame ----------
+df_feat <- joined_train_data %>%
+  add_calendar_features() %>%
+  add_holiday_proximity() %>%
+  add_markdown_features() %>%
+  add_holiday_sales_lookbacks() %>%
+  add_store_dept_stats(train_joined = joined_train_data, df = .) %>%
+  add_store_dept_history() %>%
+  add_macro_features() %>%
+  mutate(
+    Store = factor(Store),
+    Dept  = factor(Dept),
+    IsHoliday = factor(IsHoliday),
+    IsHoliday_prevWeek = factor(coalesce(IsHoliday_prevWeek, FALSE)),
+    IsHoliday_nextWeek = factor(coalesce(IsHoliday_nextWeek, FALSE))
+  )
+
+# ---------- Tidymodels recipe ----------
+sales_rec <- recipe(Weekly_Sales ~ ., data = df_feat) %>%
+  step_rm(Date) %>%                          # keep engineered calendar fields instead
+  step_zv(all_predictors()) %>%
+  step_impute_median(all_numeric_predictors()) %>%
+  step_unknown(all_nominal_predictors()) %>%
+  step_other(all_nominal_predictors(), threshold = 0.01) %>%
+  step_dummy(all_nominal_predictors(), one_hot = TRUE) %>%
+  step_normalize(all_numeric_predictors())   # drop this if using tree models
 
 #Prep & Bake Recipe
-prep <- prep(my_recipe)
+prep <- prep(sales_rec)
 
 all_preds <- tibble(Id = character(), Weekly_Sales = numeric())
-n_storeDepts <- fullTest %>% distinct(Store, Dept) %>% nrow()
+n_storeDepts <- df_feat %>% distinct(Store, Dept) %>% nrow()
 cntr <- 0
 for(store in unique(fullTest$Store)){
   
