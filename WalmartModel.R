@@ -3,6 +3,9 @@ library(dplyr)
 library(tidymodels)
 library(lubridate)
 
+setwd("/Users/pprobst/Library/CloudStorage/OneDrive-BrighamYoungUniversity/STAT 348/WalmartSalesForecasting")
+
+
 #Load in data
 train_data <- vroom("data/train.csv")
 test_data <- vroom("data/test.csv")
@@ -28,6 +31,10 @@ clean_features_df <- features_df %>%
 joined_train_data <- left_join(train_data, store_df, by = "Store")
 joined_train_data <- left_join(joined_train_data, clean_features_df, by = c("Store" ,"Date"))
 head(joined_train_data)
+
+# Join test data with engineered features
+joined_test_data <- left_join(test_data, store_df, by = "Store")
+joined_test_data <- left_join(joined_test_data, clean_features_df, by = c("Store" ,"Date"))
 
 ###FEATURE ENGINEERING###
 
@@ -121,8 +128,8 @@ add_store_dept_history <- function(df) {
     arrange(Store, Date) %>%
     group_by(Store) %>%
     mutate(
-      IsHoliday_prevWeek = lag(IsHoliday, 1),
-      IsHoliday_nextWeek = lead(IsHoliday, 1)
+      # IsHoliday_prevWeek = lag(IsHoliday, 1),
+      # IsHoliday_nextWeek = lead(IsHoliday, 1)
     ) %>%
     ungroup()
   
@@ -131,18 +138,18 @@ add_store_dept_history <- function(df) {
     arrange(Store, Dept, Date) %>%
     group_by(Store, Dept) %>%
     mutate(
-      Lag_1_week_sales  = lag(Weekly_Sales, 1),
-      Lag_2_week_sales  = lag(Weekly_Sales, 2),
-      Lag_4_week_sales  = lag(Weekly_Sales, 4),
-      Lag_52_week_sales = lag(Weekly_Sales, 52),
-      
-      sales_lag1 = lag(Weekly_Sales, 1),
-      Rolling_4w_mean   = slide_dbl(sales_lag1, mean, .before = 3,  .complete = TRUE, na.rm = TRUE),
-      Rolling_8w_mean   = slide_dbl(sales_lag1, mean, .before = 7,  .complete = TRUE, na.rm = TRUE),
-      Rolling_13w_mean  = slide_dbl(sales_lag1, mean, .before = 12, .complete = TRUE, na.rm = TRUE),
-      Rolling_26w_mean  = slide_dbl(sales_lag1, mean, .before = 25, .complete = TRUE, na.rm = TRUE),
-      Rolling_52w_mean  = slide_dbl(sales_lag1, mean, .before = 51, .complete = TRUE, na.rm = TRUE),
-      
+      # Lag_1_week_sales  = lag(Weekly_Sales, 1),
+      # Lag_2_week_sales  = lag(Weekly_Sales, 2),
+      # Lag_4_week_sales  = lag(Weekly_Sales, 4),
+      # Lag_52_week_sales = lag(Weekly_Sales, 52),
+      #
+      # sales_lag1 = lag(Weekly_Sales, 1),
+      # Rolling_4w_mean   = slide_dbl(sales_lag1, mean, .before = 3,  .complete = TRUE, na.rm = TRUE),
+      # Rolling_8w_mean   = slide_dbl(sales_lag1, mean, .before = 7,  .complete = TRUE, na.rm = TRUE),
+      # Rolling_13w_mean  = slide_dbl(sales_lag1, mean, .before = 12, .complete = TRUE, na.rm = TRUE),
+      # Rolling_26w_mean  = slide_dbl(sales_lag1, mean, .before = 25, .complete = TRUE, na.rm = TRUE),
+      # Rolling_52w_mean  = slide_dbl(sales_lag1, mean, .before = 51, .complete = TRUE, na.rm = TRUE),
+      #
       Dept_x_Holiday       = as.numeric(IsHoliday),
       Dept_x_Temperature   = Temperature,
       Dept_x_Fuel_Price    = Fuel_Price,
@@ -150,7 +157,7 @@ add_store_dept_history <- function(df) {
       Dept_x_Unemployment  = Unemployment
     ) %>%
     ungroup() %>%
-    select(-sales_lag1)
+    # select(-sales_lag1)
 }
 
 add_macro_features <- function(df) {
@@ -159,7 +166,7 @@ add_macro_features <- function(df) {
     group_by(Store) %>%
     mutate(
       Macro_raw    = CPI - Unemployment,
-      Macro_Trend  = slide_dbl(lag(Macro_raw, 1), mean, .before = 12, .complete = FALSE, na.rm = TRUE),
+      # Macro_Trend  = slide_dbl(lag(Macro_raw, 1), mean, .before = 12, .complete = FALSE, na.rm = TRUE),
       Fuel_Price_meanStore = mean(Fuel_Price, na.rm = TRUE),
       Fuel_Price_Elasticity_Proxy = Fuel_Price / Fuel_Price_meanStore
     ) %>%
@@ -175,29 +182,30 @@ add_holiday_sales_lookbacks <- function(df) {
   xmas_week <- tibble(Year = years, XMasWeek = isoweek(ymd(sprintf("%d-12-25", years))))
   thx_week  <- tibble(Year = years, ThxWeek  = isoweek(map(years, thanksgiving_date) |> as_date()))
   
-  xmas_sales <- df %>%
-    left_join(xmas_week, by = "Year") %>%
-    filter(WeekOfYear == XMasWeek) %>%
-    group_by(Store, Dept, Year) %>%
-    summarise(Christmas_Sales = mean(Weekly_Sales, na.rm = TRUE), .groups = "drop") %>%
-    mutate(Year = Year + 1) %>%
-    rename(Lag_Christmas_Sales = Christmas_Sales)
-  
-  thx_sales <- df %>%
-    left_join(thx_week, by = "Year") %>%
-    filter(WeekOfYear == ThxWeek) %>%
-    group_by(Store, Dept, Year) %>%
-    summarise(Thanksgiving_Sales = mean(Weekly_Sales, na.rm = TRUE), .groups = "drop") %>%
-    mutate(Year = Year + 1) %>%
-    rename(Lag_Thanksgiving_Sales = Thanksgiving_Sales)
-  
-  df %>%
-    left_join(xmas_sales, by = c("Store", "Dept", "Year")) %>%
-    left_join(thx_sales,  by = c("Store", "Dept", "Year"))
+  # xmas_sales <- df %>%
+  #   left_join(xmas_week, by = "Year") %>%
+  #   filter(WeekOfYear == XMasWeek) %>%
+  #   group_by(Store, Dept, Year) %>%
+  #   summarise(Christmas_Sales = mean(Weekly_Sales, na.rm = TRUE), .groups = "drop") %>%
+  #   mutate(Year = Year + 1) %>%
+  #   rename(Lag_Christmas_Sales = Christmas_Sales)
+  # 
+  # thx_sales <- df %>%
+  #   left_join(thx_week, by = "Year") %>%
+  #   filter(WeekOfYear == ThxWeek) %>%
+  #   group_by(Store, Dept, Year) %>%
+  #   summarise(Thanksgiving_Sales = mean(Weekly_Sales, na.rm = TRUE), .groups = "drop") %>%
+  #   mutate(Year = Year + 1) %>%
+  #   rename(Lag_Thanksgiving_Sales = Thanksgiving_Sales)
+  # 
+  # df %>%
+  #   left_join(xmas_sales, by = c("Store", "Dept", "Year")) %>%
+  #   left_join(thx_sales,  by = c("Store", "Dept", "Year"))
+  df
 }
 
 # ---------- Build final modeling frame ----------
-df_feat <- joined_train_data %>%
+fullTrain <- joined_train_data %>%
   add_calendar_features() %>%
   add_holiday_proximity() %>%
   add_markdown_features() %>%
@@ -208,10 +216,29 @@ df_feat <- joined_train_data %>%
   mutate(
     Store = factor(Store),
     Dept  = factor(Dept),
-    IsHoliday = factor(IsHoliday),
-    IsHoliday_prevWeek = factor(coalesce(IsHoliday_prevWeek, FALSE)),
-    IsHoliday_nextWeek = factor(coalesce(IsHoliday_nextWeek, FALSE))
+    IsHoliday = factor(IsHoliday)
+    # IsHoliday_prevWeek = factor(coalesce(IsHoliday_prevWeek, FALSE)),
+    # IsHoliday_nextWeek = factor(coalesce(IsHoliday_nextWeek, FALSE))
   )
+
+fullTest <- joined_test_data %>%
+  add_calendar_features() %>%
+  add_holiday_proximity() %>%
+  add_markdown_features() %>%
+  add_holiday_sales_lookbacks() %>%
+  add_store_dept_stats(train_joined = joined_train_data, df = .) %>%
+  add_store_dept_history() %>%
+  add_macro_features() %>%
+  mutate(
+    Store = factor(Store),
+    Dept  = factor(Dept),
+    IsHoliday = factor(IsHoliday)
+    # IsHoliday_prevWeek = factor(coalesce(IsHoliday_prevWeek, FALSE)),
+    # IsHoliday_nextWeek = factor(coalesce(IsHoliday_nextWeek, FALSE))
+  )
+
+# keep df_feat for recipe/tuning convenience
+df_feat <- fullTrain
 
 # ---------- Tidymodels recipe ----------
 sales_rec <- recipe(Weekly_Sales ~ ., data = df_feat) %>%
@@ -303,5 +330,3 @@ for(store in unique(fullTest$Store)){
 ## Write out after each store so I don't have to start over
 vroom_write(x=all_preds,
             file=paste0("./HeatonPredictions.csv"), delim=",")
-
-
