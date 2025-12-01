@@ -22,8 +22,6 @@ clean_features_df <- features_df %>%
   mutate(across(starts_with("MarkDown"), ~if_else(. < 0, 0, .))) %>%
   # Create TotalMarkdown column
   mutate(TotalMarkdown = rowSums(across(starts_with("MarkDown")))) %>%
-  # Remove original markdown columns
-  select(-starts_with("MarkDown")) %>%
   # Create MarkdownFlag (1 if any markdown > 0, else 0)
   mutate(MarkdownFlag = if_else(TotalMarkdown > 0, 1, 0))
 
@@ -32,9 +30,17 @@ joined_train_data <- left_join(train_data, store_df, by = "Store")
 joined_train_data <- left_join(joined_train_data, clean_features_df, by = c("Store" ,"Date"))
 head(joined_train_data)
 
+joined_train_data <- joined_train_data %>%
+  mutate(IsHoliday = IsHoliday.x) %>%
+  select(-IsHoliday.x, -IsHoliday.y)
+
 # Join test data with engineered features
 joined_test_data <- left_join(test_data, store_df, by = "Store")
 joined_test_data <- left_join(joined_test_data, clean_features_df, by = c("Store" ,"Date"))
+
+joined_test_data <- joined_test_data %>%
+  mutate(IsHoliday = IsHoliday.x) %>%
+  select(-IsHoliday.x, -IsHoliday.y)
 
 ###FEATURE ENGINEERING###
 
@@ -67,13 +73,14 @@ add_calendar_features <- function(df) {
     )
 }
 
-add_holiday_proximity <- function(df) {
+add_holiday_proximity <- function(df, holiday_calendar) {
   df %>%
+    left_join(holiday_calendar, by = "Year") %>%
     mutate(
-      Weeks_to_Christmas    = weeks_to(Date, ymd(sprintf("%d-12-25", Year))),
-      Weeks_to_Thanksgiving = weeks_to(Date, map_dbl(Year, ~ as.numeric(thanksgiving_date(.x)) ) |> as_date()),
-      Weeks_to_SuperBowl    = weeks_to(Date, map_dbl(Year, ~ as.numeric(super_bowl_date(.x)) ) |> as_date()),
-      Weeks_to_LaborDay     = weeks_to(Date, map_dbl(Year, ~ as.numeric(labor_day_date(.x)) ) |> as_date())
+      Weeks_to_Christmas    = weeks_to(Date, Christmas),
+      Weeks_to_Thanksgiving = weeks_to(Date, Thanksgiving),
+      Weeks_to_SuperBowl    = weeks_to(Date, SuperBowl),
+      Weeks_to_LaborDay     = weeks_to(Date, LaborDay)
     )
 }
 
@@ -86,35 +93,7 @@ add_markdown_features <- function(df) {
     )
 }
 
-add_store_dept_stats <- function(train_joined, df) {
-  # calendar fields needed for seasonality
-  tj <- add_calendar_features(train_joined)
-  
-  store_stats <- tj %>%
-    group_by(Store) %>%
-    summarise(
-      Store_Historical_AvgSales = mean(Weekly_Sales, na.rm = TRUE),
-      Store_First_Date = min(Date),
-      Store_Last_Date  = max(Date),
-      Store_Historical_Trend = coef(lm(Weekly_Sales ~ as.numeric(Date)))[2],
-      .groups = "drop"
-    ) %>%
-    mutate(Store_Age = as.numeric(difftime(Store_Last_Date, Store_First_Date, units = "days")) / 365.25) %>%
-    select(-Store_First_Date, -Store_Last_Date)
-  
-  dept_stats <- tj %>%
-    group_by(Dept) %>%
-    summarise(
-      Dept_Mean_Sales   = mean(Weekly_Sales, na.rm = TRUE),
-      Dept_Median_Sales = median(Weekly_Sales, na.rm = TRUE),
-      Dept_Trend_Linear = coef(lm(Weekly_Sales ~ as.numeric(Date)))[2],
-      .groups = "drop"
-    )
-  
-  dept_season <- tj %>%
-    group_by(Dept, WeekOfYear) %>%
-    summarise(Dept_Seasonality_Index = mean(Weekly_Sales, na.rm = TRUE), .groups = "drop")
-  
+add_store_dept_stats <- function(df, store_stats, dept_stats, dept_season) {
   df %>%
     left_join(store_stats, by = "Store") %>%
     left_join(dept_stats,  by = "Dept") %>%
@@ -156,7 +135,7 @@ add_store_dept_history <- function(df) {
       Dept_x_CPI           = CPI,
       Dept_x_Unemployment  = Unemployment
     ) %>%
-    ungroup() %>%
+    ungroup()
     # select(-sales_lag1)
 }
 
@@ -204,13 +183,59 @@ add_holiday_sales_lookbacks <- function(df) {
   df
 }
 
+# ---------- Pre-compute shared feature tables to speed up modeling ----------
+
+# Add calendar features to the full joined training and test data once
+joined_train_cal <- joined_train_data %>%
+  add_calendar_features()
+
+joined_test_cal <- joined_test_data %>%
+  add_calendar_features()
+
+# Pre-compute holiday calendar by Year for vectorised holiday proximity
+all_years <- sort(unique(c(joined_train_cal$Year, joined_test_cal$Year)))
+holiday_calendar <- tibble(
+  Year        = all_years,
+  Christmas   = ymd(sprintf("%d-12-25", Year)),
+  Thanksgiving= thanksgiving_date(Year),
+  SuperBowl   = super_bowl_date(Year),
+  LaborDay    = labor_day_date(Year)
+)
+
+# Pre-compute store / department level statistics & seasonality from training data
+store_stats <- joined_train_cal %>%
+  group_by(Store) %>%
+  summarise(
+    Store_Historical_AvgSales = mean(Weekly_Sales, na.rm = TRUE),
+    Store_First_Date = min(Date),
+    Store_Last_Date  = max(Date),
+    Store_Historical_Trend = coef(lm(Weekly_Sales ~ as.numeric(Date)))[2],
+    .groups = "drop"
+  ) %>%
+  mutate(Store_Age = as.numeric(difftime(Store_Last_Date, Store_First_Date, units = "days")) / 365.25) %>%
+  select(-Store_First_Date, -Store_Last_Date)
+
+dept_stats <- joined_train_cal %>%
+  group_by(Dept) %>%
+  summarise(
+    Dept_Mean_Sales   = mean(Weekly_Sales, na.rm = TRUE),
+    Dept_Median_Sales = median(Weekly_Sales, na.rm = TRUE),
+    Dept_Trend_Linear = coef(lm(Weekly_Sales ~ as.numeric(Date)))[2],
+    .groups = "drop"
+  )
+
+dept_season <- joined_train_cal %>%
+  group_by(Dept, WeekOfYear) %>%
+  summarise(Dept_Seasonality_Index = mean(Weekly_Sales, na.rm = TRUE), .groups = "drop")
+
 # ---------- Build final modeling frame ----------
-fullTrain <- joined_train_data %>%
-  add_calendar_features() %>%
-  add_holiday_proximity() %>%
+fullTrain <- joined_train_cal %>%
+  add_holiday_proximity(holiday_calendar) %>%
   add_markdown_features() %>%
   # add_holiday_sales_lookbacks() %>%
-  add_store_dept_stats(train_joined = joined_train_data, df = .) %>%
+  add_store_dept_stats(store_stats = store_stats,
+                       dept_stats  = dept_stats,
+                       dept_season = dept_season) %>%
   add_store_dept_history() %>%
   add_macro_features() %>%
   mutate(
@@ -221,12 +246,13 @@ fullTrain <- joined_train_data %>%
     # IsHoliday_nextWeek = factor(coalesce(IsHoliday_nextWeek, FALSE))
   )
 
-fullTest <- joined_test_data %>%
-  add_calendar_features() %>%
-  add_holiday_proximity() %>%
+fullTest <- joined_test_cal %>%
+  add_holiday_proximity(holiday_calendar) %>%
   add_markdown_features() %>%
   # add_holiday_sales_lookbacks() %>%
-  add_store_dept_stats(train_joined = joined_train_data, df = .) %>%
+  add_store_dept_stats(store_stats = store_stats,
+                       dept_stats  = dept_stats,
+                       dept_season = dept_season) %>%
   add_store_dept_history() %>%
   add_macro_features() %>%
   mutate(
@@ -239,19 +265,6 @@ fullTest <- joined_test_data %>%
 
 # keep df_feat for recipe/tuning convenience
 df_feat <- fullTrain
-
-# ---------- Tidymodels recipe ----------
-sales_rec <- recipe(Weekly_Sales ~ ., data = df_feat) %>%
-  step_rm(Date) %>%                          # keep engineered calendar fields instead
-  step_zv(all_predictors()) %>%
-  step_impute_median(all_numeric_predictors()) %>%
-  step_unknown(all_nominal_predictors()) %>%
-  step_other(all_nominal_predictors(), threshold = 0.01) %>%
-  step_dummy(all_nominal_predictors(), one_hot = TRUE) %>%
-  step_normalize(all_numeric_predictors())   # drop this if using tree models
-
-#Prep & Bake Recipe
-prep <- prep(sales_rec)
 
 all_preds <- tibble(Id = character(), Weekly_Sales = numeric())
 n_storeDepts <- df_feat %>% distinct(Store, Dept) %>% nrow()
@@ -329,4 +342,4 @@ for(store in unique(fullTest$Store)){
 
 ## Write out after each store so I don't have to start over
 vroom_write(x=all_preds,
-            file=paste0("./HeatonPredictions.csv"), delim=",")
+            file=paste0("./WalmartPredictions.csv"), delim=",")
